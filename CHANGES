@@ -1,0 +1,19 @@
+=========================
+2006-09-17 23:57:00 v0_02
+=========================
+
+  2006-09-17 23:57:00 (r2) by ptinsley
+
+    Added support for api/response type, data ends up in api-response variable.
+
+=========================
+2006-09-17 22:19:20 v0_01
+=========================
+
+  2006-09-17 22:19:20 (r1) by ptinsley
+
+    Initial package of the module.
+
+==============
+End of Excerpt
+==============
