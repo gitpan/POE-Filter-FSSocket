@@ -4,48 +4,45 @@ POE::Filter::FSSocket - a POE filter that parses FreeSWITCH events into hashes
 
 =head1 SYNOPSIS
 
-#!/usr/bin/perl
-
-use warnings;
-use strict;
-
-use POE qw(Component::Client::TCP Filter::FSSocket);
-use Data::Dumper;
-
-POE::Component::Client::TCP->new(
-        'RemoteAddress' => '127.0.0.1',
-        'RemotePort'    => '8021',
-        'Connected'     => \&handle_connect,
-        'Disconnected'  => \&handle_disconnect,
-        'Started'       => \&handle_starting,
-        'ServerInput'   => \&handle_server_input,
-        'Filter'        => 'POE::Filter::FSSocket',
-);
-
-POE::Kernel->run();
-exit;
-
-my $auth_sent = 0;
-my $password = "ClueCon";
-
-sub handle_server_input {
-        my ($heap,$input) = @_[HEAP,ARG0];
-
-        print Dumper $input;
-
-
-        if($input->{'Content-Type'} eq "auth/request") {
-                $auth_sent = 1;
-                $heap->{'server'}->put("auth $password");
-        } elsif ($input->{'Content-Type'} eq "command/reply") {
-                if($auth_sent == 1) {
-                        $auth_sent = -1;
-
-                        #do post auth stuff
-                        $heap->{'server'}->put("events plain all");
-                }
-        }
-}
+  #!/usr/bin/perl
+  
+  use warnings;
+  use strict;
+  
+  use POE qw(Component::Client::TCP Filter::FSSocket);
+  use Data::Dumper;
+  
+  POE::Component::Client::TCP->new(
+          'RemoteAddress' => '127.0.0.1',
+          'RemotePort'    => '8021',
+          'ServerInput'   => \&handle_server_input,
+          'Filter'        => 'POE::Filter::FSSocket',
+  );
+  
+  POE::Kernel->run();
+  exit;
+  
+  my $auth_sent = 0;
+  my $password = "ClueCon";
+  
+  sub handle_server_input {
+          my ($heap,$input) = @_[HEAP,ARG0];
+  
+          print Dumper $input;
+  
+  
+          if($input->{'Content-Type'} eq "auth/request") {
+                  $auth_sent = 1;
+                  $heap->{'server'}->put("auth $password");
+          } elsif ($input->{'Content-Type'} eq "command/reply") {
+                  if($auth_sent == 1) {
+                          $auth_sent = -1;
+  
+                          #do post auth stuff
+                          $heap->{'server'}->put("events plain all");
+                  }
+          }
+  }
 
 =head1 DESCRIPTION
 
@@ -57,42 +54,43 @@ as many event types as you like or all for everything.  You specify a list of
 event types by putting spaces between them ex: "events plain api log talk"
 
 Currently known event types (Event-Name):
-CUSTOM
-CHANNEL_CREATE
-CHANNEL_DESTROY
-CHANNEL_STATE
-CHANNEL_ANSWER
-CHANNEL_HANGUP
-CHANNEL_EXECUTE
-CHANNEL_BRIDGE
-CHANNEL_UNBRIDGE
-CHANNEL_PROGRESS
-CHANNEL_OUTGOING
-CHANNEL_PARK
-CHANNEL_UNPARK
-API
-LOG
-INBOUND_CHAN
-OUTBOUND_CHAN
-STARTUP
-SHUTDOWN
-PUBLISH
-UNPUBLISH
-TALK
-NOTALK
-SESSION_CRASH
-MODULE_LOAD
-DTMF
-MESSAGE
-CODEC
-BACKGROUND_JOB
-ALL
+  CUSTOM
+  CHANNEL_CREATE
+  CHANNEL_DESTROY
+  CHANNEL_STATE
+  CHANNEL_ANSWER
+  CHANNEL_HANGUP
+  CHANNEL_EXECUTE
+  CHANNEL_BRIDGE
+  CHANNEL_UNBRIDGE
+  CHANNEL_PROGRESS
+  CHANNEL_OUTGOING
+  CHANNEL_PARK
+  CHANNEL_UNPARK
+  API
+  LOG
+  INBOUND_CHAN
+  OUTBOUND_CHAN
+  STARTUP
+  SHUTDOWN
+  PUBLISH
+  UNPUBLISH
+  TALK
+  NOTALK
+  SESSION_CRASH
+  MODULE_LOAD
+  DTMF
+  MESSAGE
+  CODEC
+  BACKGROUND_JOB
+  ALL
 
 Currently handled FreeSWITCH messages (Content-Type):
-auth/request
-command/response
-text/event-plain
-api/response (data in api-response variable)
+  auth/request
+  command/response
+  text/event-plain
+  api/response (data in __DATA__ variable)
+  log/data (data in __DATA__ variable)
 
 =cut
 
@@ -103,7 +101,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION @SIA);
-$VERSION = '0.02';
+$VERSION = '0.03';
 @SIA = qw(POE::Filter);
 
 use Carp qw(carp croak);
@@ -121,7 +119,7 @@ sub STATE_WAITING()     {1} #looking for new input
 sub STATE_CLEANUP()     {2} #wipe out record separators
 sub STATE_GETDATA()     {3} #have header, get data
 sub STATE_FLUSH()       {4} #puts us back in wait state and tells us to kill the parsed_record
-sub STATE_APIRESPONSE() {5} #used for api output
+sub STATE_TEXTRESPONSE() {5} #used for api output
 
 sub new {
 	my $class = shift;
@@ -187,7 +185,11 @@ sub get_one {
 					$self->[PARSER_STATE]     = STATE_CLEANUP;
 					$self->[PARSER_STATENEXT] = STATE_GETDATA;
 				} elsif ($1 eq "api/response") {
-					$self->[PARSER_STATENEXT] = STATE_APIRESPONSE;
+					$self->[PARSER_STATENEXT] = STATE_TEXTRESPONSE;
+				} elsif ($1 eq "log/data") {
+					#Kind of a hack but the alternative is to have a NEXTNEXTresponse type :(
+					$self->[CURRENT_LENGTH] = -1;
+					$self->[PARSER_STATENEXT] = STATE_TEXTRESPONSE;
 				} else {
 					croak ref($self) . " unknown input [" . $self->[PARSER_STATE] . "] (" . $line . ")";
 				}
@@ -215,17 +217,21 @@ sub get_one {
 			} else {
 				croak ref($self) . " unknown input [STATE_GETDATA] (" . $line . ")";
 			}
-		} elsif ($self->[PARSER_STATE] == STATE_APIRESPONSE) {
+		} elsif ($self->[PARSER_STATE] == STATE_TEXTRESPONSE) {
+			if($self->[CURRENT_LENGTH] == -1) {
+				$self->[CURRENT_LENGTH] = 0;
+				next;
+			}
+
 			$self->[CURRENT_LENGTH] += (length($line) + 1);
 
 			if(($self->[CURRENT_LENGTH] - 1) == $self->[PARSED_RECORD]{'Content-Length'}) {
 				$self->[PARSER_STATE] = STATE_FLUSH;
-				$self->[PARSED_RECORD]{'api-response'} .= $line;
+				$self->[PARSED_RECORD]{'__DATA__'} .= $line;
 
 				return [$self->[PARSED_RECORD]];
-
 			} else {
-				$self->[PARSED_RECORD]{'api-response'} .= $line . "\n";
+				$self->[PARSED_RECORD]{'__DATA__'} .= $line . "\n";
 			}
 		}
 	}
