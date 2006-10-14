@@ -1,4 +1,13 @@
 =========================
+2006-10-14 00:08:00 v0_04
+=========================
+
+  2006-10-14 00:08:00 (r4) by ptinsley
+
+    Fixed support for log/data
+    Added an example that is a quick curses console for freeswitch
+
+=========================
 2006-09-18 21:08:00 v0_03
 =========================
 

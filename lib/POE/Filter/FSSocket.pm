@@ -54,6 +54,7 @@ as many event types as you like or all for everything.  You specify a list of
 event types by putting spaces between them ex: "events plain api log talk"
 
 Currently known event types (Event-Name):
+
   CUSTOM
   CHANNEL_CREATE
   CHANNEL_DESTROY
@@ -86,6 +87,7 @@ Currently known event types (Event-Name):
   ALL
 
 Currently handled FreeSWITCH messages (Content-Type):
+
   auth/request
   command/response
   text/event-plain
@@ -187,8 +189,6 @@ sub get_one {
 				} elsif ($1 eq "api/response") {
 					$self->[PARSER_STATENEXT] = STATE_TEXTRESPONSE;
 				} elsif ($1 eq "log/data") {
-					#Kind of a hack but the alternative is to have a NEXTNEXTresponse type :(
-					$self->[CURRENT_LENGTH] = -1;
 					$self->[PARSER_STATENEXT] = STATE_TEXTRESPONSE;
 				} else {
 					croak ref($self) . " unknown input [" . $self->[PARSER_STATE] . "] (" . $line . ")";
@@ -284,7 +284,7 @@ at pdt@jackhammer.org.
 
 Copyright 2006, Paul Tinsley. All rights are reserved.
 
-POE::Filter::Snort is free software; it is currently licensed under the MPL
+POE::Filter::FSSocket is free software; it is currently licensed under the MPL
 license version 1.1.
 
 =cut
