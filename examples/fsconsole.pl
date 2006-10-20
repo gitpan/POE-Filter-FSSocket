@@ -16,6 +16,8 @@ if (Term::Visual::DEBUG) {
     *D = *Term::Visual::ERRS;
 }
 
+#local *ERROR = *STDERR;
+
 
 $SIG{__DIE__} = sub {
     if (Term::Visual::DEBUG) {
@@ -42,6 +44,12 @@ our %Pallet = (
 our $terminal;
 my %sockets;
 my %windows;
+my %unread_count;
+my %commands = (
+	'window' => 1,
+	'w'      => 1,
+	'win'    => 1,
+);
 ###############################################################################
 ##   END Globals ##############################################################
 ###############################################################################
@@ -52,6 +60,7 @@ POE::Session->create(
 		'_start'       => \&handle_start,        #session start
 		'_stop'        => \&handle_stop,         #session stop
 		'curses_input' => \&handle_curses_input, #input from the keyboard
+		'update_time'  => \&handle_update_time,  #update the status line clock
 		'quit'         => \&handle_quit,         #handler to do any cleanup
 		'server_input' => \&handle_server_input,
 		'_default'      => \&handle_default,
@@ -80,6 +89,7 @@ sub handle_start {
 		'Alias'        => 'terminal', #poe alias for this
 		'History_Size' => 300,        #number of things to keep in history
 		'Common_Input' => 1,          #all windows share input and history
+		'Tab_Complete' => \&tab_complete,
 	);
 
 	$terminal = $heap->{'terminal'};
@@ -97,6 +107,10 @@ sub handle_start {
 				'format' => '%s',
 				'fields' => ['time'],
 			},
+			'1' => {
+				'format' => '%s',
+				'fields' => ['window_status'],
+			},
 		},
 	);
 
@@ -110,6 +124,10 @@ sub handle_start {
 			'0' => {
 				'format' => '%s',
 				'fields' => ['time'],
+			},
+			'1' => {
+				'format' => '%s',
+				'fields' => ['window_status'],
 			},
 		},
 	);
@@ -125,6 +143,10 @@ sub handle_start {
 				'format' => '%s',
 				'fields' => ['time'],
 			},
+			'1' => {
+				'format' => '%s',
+				'fields' => ['window_status'],
+			},
 		},
 	);
 
@@ -133,7 +155,31 @@ sub handle_start {
 	#tell the terminal what to call when there is input from the keyboard
 	$kernel->post('terminal' => 'send_me_input' => 'curses_input');
 
-	#$terminal->change_window(0);
+	$terminal->change_window(0);
+	$kernel->delay_set('update_time' => 1);
+	$terminal->set_status_field(0, 'time' => scalar(localtime));
+	new_message('destination_window' => 0, 'message' =>  "
+Welcome to the FreeSWITCH POE Curses Console!
+  The console is split into three windows:
+    - 'console' for api response messages
+    - 'log'     for freeswitch log output (simply send the log level you want 
+                  to start seeing events eg: 'log all')
+    - 'event'   for freeswitch event output (must subscribe in plain format
+                  eg: 'event plain all')
+
+To switch between windows type 'w <windowname' so 'w log' for example.
+
+Coming soon:
+  - Tab completion
+  - command history
+  - window status in the bar (messages added since last view, etc...)
+
+Send any bug reports or comments to jackhammer\@gmail.com
+
+Thanks,
+Paul\n");
+
+	$terminal->set_status_field($terminal->current_window, 'window_status' => format_window_status());
 
 	#connect to freeswitch
 	$heap->{'freeswitch'} = POE::Component::Client::TCP->new(
@@ -144,8 +190,9 @@ sub handle_start {
 		'ServerError'   => \&handle_server_error,
 		'Disconnected'  => \&handle_server_disconnect,
 		'Domain'        => AF_INET,
-		'Filter'       => 'POE::Filter::FSSocket',
+		'Filter'       => POE::Filter::FSSocket->new(),
 	);
+
 }
 
 #called when users enter commands in a window
@@ -162,14 +209,13 @@ sub handle_curses_input {
 	} elsif ($input =~ /^w\ (.*)$/) {
 		#get the id of the requested window
 		eval {
-			print ERROR "window: $1\n";
 			my $window_id = $windows{$1};
 
 			#see if it's real
 			if(defined($window_id)) {
-				print ERROR "changing to: $window_id\n";
+				$unread_count{$window_id} = 0;
 				$terminal->change_window($window_id);
-				$terminal->set_status_field($heap, "weeeeeee");
+				$terminal->set_status_field($window_id, 'window_status' => &format_window_status());
 			}
 		};
 		if($@) {
@@ -209,23 +255,21 @@ sub handle_server_input {
         my ($kernel,$heap,$input) = @_[KERNEL,HEAP,ARG0];
 
 	eval {
-		print Dumper $input;
 		#terminal HATES null
 		if(defined($input->{'__DATA__'})) {
 			$input->{'__DATA__'} =~ s/[\x00]//g;
 		}
 
-		$terminal->print(0, "Content-Type: " . $input->{'Content-Type'});
 		#handle the login
 		if($input->{'Content-Type'} eq "auth/request") {
 			$heap->{'server'}->put("auth $server_secret");
 		} elsif ($input->{'Content-Type'} eq "api/response") {
-			$terminal->print(0, "Response: ");
-			$terminal->print(0, $input->{'__DATA__'});
+			new_message('destination_window' => 0, 'message' => 'Response: ');
+			new_message('destination_window' => 0, 'message' => $input->{'__DATA__'});
 		} elsif ($input->{'Content-Type'} eq "log/data") {
-			$terminal->print(1, $input->{'__DATA__'});
+			new_message('destination_window' => 1, 'message' => $input->{'__DATA__'});
 		} elsif ($input->{'Content-Type'} eq "text/event-plain") {
-			$terminal->print(2, Dumper $input);
+			new_message('destination_window' => 2, 'message' => Dumper $input);
 		}
 	};
 
@@ -242,6 +286,76 @@ sub handle_server_error {
 
 sub handle_server_disconnect {
 }
+
+sub tab_complete {
+	my $left = shift;
+
+	my @return;
+
+	if(defined($commands{$left})) {
+		return [$left . " "];
+	#} elsif () {
+	}
+		
+}
+
+sub handle_update_time {
+	my ($kernel, $heap) = @_[KERNEL, HEAP];
+	$terminal->set_status_field($terminal->current_window, 'time' => scalar(localtime));
+	$kernel->delay_set('update_time' => 1);
+}
 ###############################################################################
 ##   END Handlers #############################################################
 ###############################################################################
+
+sub new_message {
+	my %args = @_;
+
+	my $message            = $args{'message'};
+	my $destination_window = $args{'destination_window'};
+
+	my $status_field;
+
+	#see if we are on the window being updated
+	if($terminal->current_window != $destination_window) {
+		#increment the unread count for the window
+		#FIXME, should we count messages or lines?
+		$unread_count{$destination_window}++;
+
+
+		#update the status bar
+		eval {
+			$terminal->set_status_field($terminal->current_window, 'window_status' => &format_window_status());
+		};
+
+		if($@) {
+			print $@;
+		}
+	}
+
+
+	#deliver the message
+	$terminal->print($destination_window, $message);
+}
+
+sub format_window_status {
+	my $status_field;
+
+	#put all the windows in the bar with their current unread count
+	foreach my $window (sort {$windows{$a} <=> $windows{$b}} keys %windows) {
+		#see if we are printing the current window
+		if($terminal->current_window == $windows{$window}) {
+			$status_field .= "[\0(current)$window\0(st_frames)";
+		} else {
+			$status_field .= "[$window";
+		}
+
+		if($unread_count{$windows{$window}}) {
+			$status_field .= " (" . $unread_count{$windows{$window}} . ")";
+		}
+
+		$status_field .= "] ";
+	}
+
+	return $status_field;
+}

@@ -11,6 +11,9 @@ POE::Filter::FSSocket - a POE filter that parses FreeSWITCH events into hashes
   
   use POE qw(Component::Client::TCP Filter::FSSocket);
   use Data::Dumper;
+
+  my $auth_sent = 0;
+  my $password = "ClueCon";
   
   POE::Component::Client::TCP->new(
           'RemoteAddress' => '127.0.0.1',
@@ -21,9 +24,6 @@ POE::Filter::FSSocket - a POE filter that parses FreeSWITCH events into hashes
   
   POE::Kernel->run();
   exit;
-  
-  my $auth_sent = 0;
-  my $password = "ClueCon";
   
   sub handle_server_input {
           my ($heap,$input) = @_[HEAP,ARG0];
@@ -43,6 +43,10 @@ POE::Filter::FSSocket - a POE filter that parses FreeSWITCH events into hashes
                   }
           }
   }
+
+=head1 EXAMPLES
+
+See examples in the examples directory of the distribution.
 
 =head1 DESCRIPTION
 
@@ -102,19 +106,23 @@ package POE::Filter::FSSocket;
 use warnings;
 use strict;
 
-use vars qw($VERSION @SIA);
-$VERSION = '0.03';
-@SIA = qw(POE::Filter);
-
 use Carp qw(carp croak);
+use vars qw($VERSION);
+use base qw(POE::Filter);
+
+$VERSION = '0.05';
+
 use POE::Filter::Line;
+use Data::Dumper;
 
 #self array
-sub LINE_FILTER()      {0}
-sub PARSER_STATE()     {1}
-sub PARSER_STATENEXT() {2}
-sub PARSED_RECORD()    {3}
-sub CURRENT_LENGTH()   {4}
+sub LINE_FILTER()      {1}
+sub PARSER_STATE()     {2}
+sub PARSER_STATENEXT() {3}
+sub PARSED_RECORD()    {4}
+sub CURRENT_LENGTH()   {5}
+sub STRICT_PARSE()     {6}
+sub DEBUG_LEVEL()      {7}
 
 #states of the parser
 sub STATE_WAITING()     {1} #looking for new input
@@ -125,19 +133,36 @@ sub STATE_TEXTRESPONSE() {5} #used for api output
 
 sub new {
 	my $class = shift;
+	my %args = @_;
+
+	my $strict = 0;
+	my $debug  = 0;
+
+	if(defined($args{'debug'})) {
+		$debug = $args{'debug'};
+	}
+
+	if(defined($args{'strict'}) && $args{'strict'} == 1) {
+		$strict = $args{'strict'};
+	}
 
 	#our filter is line based, don't reinvent the wheel
 	my $line_filter = POE::Filter::Line->new();
 
 	my $self = bless [
+		"",            #not used by me but the baseclass clone wants it here
 		$line_filter,  #LINE_FILTER
 		STATE_WAITING, #PARSER_STATE
-		undef, #PARSER_STATE
+		undef,         #PARSER_STATE
 		{},            #PARSED_RECORD
 		0,             #length tracking (for Content-Length when needed)
+		$strict,       #whether we should bail on a bad parse or try and save the session
+		$debug,        #debug level
 	], $class;
 
+	return $self;
 }
+
 
 sub get_one_start {
 	my ($self, $stream) = @_;
@@ -166,9 +191,11 @@ sub get_one {
 				$self->[PARSER_STATE] = STATE_WAITING;
 			}
 
-			if($line =~ /Content-Length:\ (\d+)$/) { #We don't really use this
+			if($line =~ /Content-Length:\ (\d+)$/) {
+				#store the length
 				$self->[PARSED_RECORD]{'Content-Length'} = $1;
 
+				#see if we had a place to go from here (we should)
 				if(defined($self->[PARSER_STATENEXT])) {
 					$self->[PARSER_STATE] = $self->[PARSER_STATENEXT];
 					$self->[PARSER_STATENEXT] = undef;
@@ -190,11 +217,14 @@ sub get_one {
 					$self->[PARSER_STATENEXT] = STATE_TEXTRESPONSE;
 				} elsif ($1 eq "log/data") {
 					$self->[PARSER_STATENEXT] = STATE_TEXTRESPONSE;
-				} else {
+				} else { #unexpected input
 					croak ref($self) . " unknown input [" . $self->[PARSER_STATE] . "] (" . $line . ")";
 				}
 			} else {
-				croak ref($self) . " unknown input [STATE_WAITING] (" . $line . ")";
+				#already in wait state, if we are not in strict, keep going
+				if($self->[STRICT_PARSE]) {
+					croak ref($self) . " unknown input [STATE_WAITING] (" . $line . ")";
+				}
 			}
 		} elsif ($self->[PARSER_STATE] == STATE_CLEANUP) {
 			if($line eq "") {
@@ -205,7 +235,20 @@ sub get_one {
 					$self->[PARSER_STATE] = STATE_WAITING;
 				}
 			} else {
-				croak ref($self) . " unknown input [STATE_CLEANUP] (" . $line . ")";
+				#see if we should bail
+				if($self->[STRICT_PARSE]) {
+					croak ref($self) . " unknown input [STATE_CLEANUP] (" . $line . ")";
+				} else {
+					#we are not supposed to bail so try and save our session...
+					#since we are think we should be cleaning up, flush it all away
+					$self->[PARSER_STATE] = STATE_FLUSH;
+
+					#parser fail should be considered critical, if any debug at all, print dump
+					if($self->[DEBUG_LEVEL]) {
+						print STDERR "Parse failed on ($line) in STATE_CLEANUP:\n";
+						print STDERR Dumper $self->[PARSED_RECORD];
+					}
+				}
 			}
 		} elsif ($self->[PARSER_STATE] == STATE_GETDATA) {
 			if($line =~ /^([^:]+):\ (.*)$/) {
@@ -215,7 +258,18 @@ sub get_one {
 
 				return [ $self->[PARSED_RECORD] ];
 			} else {
-				croak ref($self) . " unknown input [STATE_GETDATA] (" . $line . ")";
+				if($self->[STRICT_PARSE]) {
+					croak ref($self) . " unknown input [STATE_GETDATA] (" . $line . ")";
+				} else {
+					#flush and run
+					$self->[PARSER_STATE] = STATE_FLUSH;
+
+					#parser fail should be considered critical, if any debug at all, print dump
+					if($self->[DEBUG_LEVEL]) {
+						print STDERR "Parse failed on ($line) in STATE_GETDATA:\n";
+						print STDERR Dumper $self->[PARSED_RECORD];
+					}
+				}
 			}
 		} elsif ($self->[PARSER_STATE] == STATE_TEXTRESPONSE) {
 			if($self->[CURRENT_LENGTH] == -1) {
@@ -246,7 +300,6 @@ sub put {
 	}
 
 	return \@row;
-#	croak ref($self) . "doesn't implement put() YET";
 	
 }
 
